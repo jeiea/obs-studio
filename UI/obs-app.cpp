@@ -288,8 +288,8 @@ string CurrentDateTimeString()
 	return buf;
 }
 
-static void LogString(fstream &logFile, const char *timeString, char *str,
-		      int log_level)
+static void LogString(ostream &logFile, const char *timeString, char *str,
+                      int log_level)
 {
 	static mutex logfile_mutex;
 	string msg;
@@ -312,6 +312,7 @@ static inline void LogStringChunk(fstream &logFile, char *str, int log_level)
 	char *nextLine = str;
 	string timeString = CurrentTimeString();
 	timeString += ": ";
+	stringstream ss;
 
 	while (*nextLine) {
 		char *nextLine = strchr(str, '\n');
@@ -324,12 +325,14 @@ static inline void LogStringChunk(fstream &logFile, char *str, int log_level)
 			nextLine[0] = 0;
 		}
 
-		LogString(logFile, timeString.c_str(), str, log_level);
+		LogString(ss, timeString.c_str(), str, log_level);
 		nextLine++;
 		str = nextLine;
 	}
 
-	LogString(logFile, timeString.c_str(), str, log_level);
+	LogString(ss, timeString.c_str(), str, log_level);
+	logFile << ss.str();
+	logFile.flush();
 }
 
 #define MAX_REPEATED_LINES 30
