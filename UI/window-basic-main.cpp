@@ -7821,12 +7821,29 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 	UpdatePause(false);
 }
 
-void OBSBasic::RecordingFileChanged(QString lastRecordingPath)
+void OBSBasic::RecordingFileChanged(QString lastRecordingPath, QString nextPath)
 {
 	QString str = QTStr("Basic.StatusBar.RecordingSavedTo");
 	ShowStatusBarMessage(str.arg(lastRecordingPath));
 
 	AutoRemux(lastRecordingPath, true);
+
+	if (api) {
+		api->on_event(OBS_FRONTEND_EVENT_RECORDING_STOPPED);
+
+		OBSDataAutoRelease outputSettings =
+			obs_output_get_settings(outputHandler->fileOutput);
+		obs_data_item_t *item =
+			obs_data_item_byname(outputSettings, "path");
+		if (item) {
+			auto path = nextPath.toStdString();
+			std::string ret = obs_data_item_get_string(item);
+			obs_data_item_set_string(&item, path.c_str());
+			obs_data_item_release(&item);
+		}
+
+		api->on_event(OBS_FRONTEND_EVENT_RECORDING_STARTED);
+	}
 }
 
 void OBSBasic::ShowReplayBufferPauseWarning()

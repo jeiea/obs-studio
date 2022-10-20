@@ -109,11 +109,12 @@ static void OBSRecordFileChanged(void *data, calldata_t *params)
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
 	const char *next_file = calldata_string(params, "next_file");
 
+    QString arg_next_file = QString::fromUtf8(next_file);
 	QString arg_last_file =
 		QString::fromUtf8(output->lastRecordingPath.c_str());
 
 	QMetaObject::invokeMethod(output->main, "RecordingFileChanged",
-				  Q_ARG(QString, arg_last_file));
+				  Q_ARG(QString, arg_last_file), Q_ARG(QString, arg_next_file));
 
 	output->lastRecordingPath = next_file;
 }

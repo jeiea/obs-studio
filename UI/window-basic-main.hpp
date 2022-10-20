@@ -700,7 +700,7 @@ public slots:
 	void RecordingStart();
 	void RecordStopping();
 	void RecordingStop(int code, QString last_error);
-	void RecordingFileChanged(QString lastRecordingPath);
+	void RecordingFileChanged(QString lastRecordingPath, QString nextPath);
 
 	void ShowReplayBufferPauseWarning();
 	void StartReplayBuffer();
