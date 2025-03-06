@@ -460,18 +460,14 @@ static inline bool capture_needs_reset(struct game_capture_config *cfg1, struct 
 {
 	if (cfg1->mode != cfg2->mode) {
 		return true;
-
 	} else if (cfg1->mode == CAPTURE_MODE_WINDOW &&
 		   (s_cmp(cfg1->class, cfg2->class) != 0 || s_cmp(cfg1->title, cfg2->title) != 0 ||
 		    s_cmp(cfg1->executable, cfg2->executable) != 0 || cfg1->priority != cfg2->priority)) {
 		return true;
-
 	} else if (cfg1->force_shmem != cfg2->force_shmem) {
 		return true;
-
 	} else if (cfg1->limit_framerate != cfg2->limit_framerate) {
 		return true;
-
 	} else if (cfg1->capture_overlays != cfg2->capture_overlays) {
 		return true;
 	}
@@ -1468,7 +1464,6 @@ static inline void copy_16bit_tex(struct game_capture *gc, int cur_texture, uint
 {
 	if (gc->global_hook_info->format == DXGI_FORMAT_B5G5R5A1_UNORM) {
 		copy_b5g5r5a1_tex(gc, cur_texture, data, pitch);
-
 	} else if (gc->global_hook_info->format == DXGI_FORMAT_B5G6R5_UNORM) {
 		copy_b5g6r5_tex(gc, cur_texture, data, pitch);
 	}
@@ -1494,11 +1489,9 @@ static void copy_shmem_tex(struct game_capture *gc)
 
 	if (object_signalled(gc->texture_mutexes[cur_texture])) {
 		mutex = gc->texture_mutexes[cur_texture];
-
 	} else if (object_signalled(gc->texture_mutexes[next_texture])) {
 		mutex = gc->texture_mutexes[next_texture];
 		cur_texture = next_texture;
-
 	} else {
 		return;
 	}
@@ -1506,7 +1499,6 @@ static void copy_shmem_tex(struct game_capture *gc)
 	if (gs_texture_map(gc->texture, &data, &pitch)) {
 		if (gc->convert_16bit) {
 			copy_16bit_tex(gc, cur_texture, data, pitch);
-
 		} else if (pitch == gc->pitch) {
 			memcpy(data, gc->texture_buffers[cur_texture], (size_t)pitch * (size_t)gc->cy);
 		} else {
@@ -1716,7 +1708,6 @@ static void game_capture_tick(void *data, float seconds)
 			gc->showing = false;
 		}
 		return;
-
 	} else if (!gc->showing) {
 		gc->retry_time = 10.0f * hook_rate_to_float(gc->config.hook_rate);
 	}
@@ -1742,7 +1733,6 @@ static void game_capture_tick(void *data, float seconds)
 		if (exit_code != 0) {
 			warn("inject process failed: %ld", (long)exit_code);
 			gc->error_acquiring = true;
-
 		} else if (!gc->capturing) {
 			gc->retry_interval = ERROR_RETRY_INTERVAL * hook_rate_to_float(gc->config.hook_rate);
 			stop_capture(gc);
