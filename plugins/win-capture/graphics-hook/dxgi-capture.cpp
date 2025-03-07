@@ -76,7 +76,11 @@ static bool setup_dxgi(IDXGISwapChain *swap)
 		device->Release();
 
 		if (level >= D3D_FEATURE_LEVEL_11_0) {
-			hlog("Found D3D11 11.0 device on swap chain");
+			if (level >= D3D_FEATURE_LEVEL_11_1) {
+				hlog("Found D3D11 11.1 device on swap chain.");
+			} else {
+				hlog("Found D3D11 11.0 device on swap chain.");
+			}
 
 			init_swap_data(swap, d3d11_capture, d3d11_free);
 			return true;

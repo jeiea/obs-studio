@@ -424,6 +424,8 @@ struct obs_core_video {
 
 	float sdr_white_level;
 	float hdr_nominal_peak_level;
+	// Windows HANDLE
+	void *draw_event;
 
 	pthread_mutex_t task_mutex;
 	struct deque tasks;

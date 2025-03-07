@@ -34,6 +34,13 @@ static inline HANDLE create_event_plus_id(const wchar_t *name, DWORD id)
 	return create_event(new_name);
 }
 
+static inline HANDLE create_event_plus_id_manual(const wchar_t *name, DWORD id)
+{
+	wchar_t new_name[64];
+	_snwprintf(new_name, 64, L"%s%lu", name, id);
+	return CreateEventW(NULL, true, false, new_name);
+}
+
 static inline HANDLE create_mutex_plus_id(const wchar_t *name, DWORD id)
 {
 	wchar_t new_name[64];

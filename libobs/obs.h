@@ -2598,6 +2598,10 @@ EXPORT const char *obs_source_get_dark_icon(const char *id);
 EXPORT const char *obs_source_get_light_icon(const char *id);
 
 /* ------------------------------------------------------------------------- */
+/* GPU Wait */
+EXPORT void set_draw_event(void *event);
+
+/* ------------------------------------------------------------------------- */
 /* Canvases */
 
 /* Canvas flags */

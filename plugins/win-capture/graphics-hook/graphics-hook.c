@@ -36,6 +36,7 @@ ipc_pipe_client_t pipe = {0};
 HANDLE signal_restart = NULL;
 HANDLE signal_stop = NULL;
 HANDLE signal_ready = NULL;
+HANDLE signal_post = NULL;
 HANDLE signal_exit = NULL;
 static HANDLE signal_init = NULL;
 HANDLE tex_mutexes[2] = {NULL, NULL};
@@ -88,6 +89,14 @@ static HANDLE init_event(const wchar_t *name, DWORD pid)
 	return handle;
 }
 
+static HANDLE init_manual_event(const wchar_t *name, DWORD pid)
+{
+	HANDLE handle = create_event_plus_id_manual(name, pid);
+	if (!handle)
+		hlog("Failed to get event '%s': %lu", name, GetLastError());
+	return handle;
+}
+
 static HANDLE init_mutex(const wchar_t *name, DWORD pid)
 {
 	HANDLE handle = create_mutex_plus_id(name, pid);
@@ -112,6 +121,11 @@ static inline bool init_signals(void)
 
 	signal_ready = init_event(EVENT_HOOK_READY, pid);
 	if (!signal_ready) {
+		return false;
+	}
+
+	signal_post = init_manual_event(EVENT_HOOK_POST, pid);
+	if (!signal_post) {
 		return false;
 	}
 
@@ -268,6 +282,7 @@ static void free_hook(void)
 	close_handle(&tex_mutexes[1]);
 	close_handle(&tex_mutexes[0]);
 	close_handle(&signal_exit);
+	close_handle(&signal_post);
 	close_handle(&signal_ready);
 	close_handle(&signal_stop);
 	close_handle(&signal_restart);
@@ -703,7 +718,7 @@ static inline bool init_shmem_thread(uint32_t pitch, uint32_t cy)
 }
 
 #ifndef ALIGN
-#define ALIGN(bytes, align) (((bytes) + ((align)-1)) & ~((align)-1))
+#define ALIGN(bytes, align) (((bytes) + ((align) - 1)) & ~((align) - 1))
 #endif
 
 bool capture_init_shmem(struct shmem_data **data, HWND window, uint32_t cx, uint32_t cy, uint32_t pitch,
@@ -868,7 +883,6 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID unused1)
 			CloseHandle(cur_thread);
 			return false;
 		}
-
 	} else if (reason == DLL_PROCESS_DETACH) {
 		if (!dup_hook_mutex) {
 			return true;

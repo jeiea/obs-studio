@@ -17,6 +17,7 @@
 
 #include <time.h>
 #include <stdlib.h>
+#include <d3d11.h>
 
 #include "obs.h"
 #include "obs-internal.h"
@@ -802,12 +803,41 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
 	pthread_mutex_unlock(&obs->video.encoder_group_mutex);
 }
 
+void set_draw_event(void *event)
+{
+	obs->video.draw_event = event;
+}
+
+int is_receiving_texture = 0;
+
 static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time, uint64_t interval_ns)
 {
 	struct obs_vframe_info vframe_info;
 	uint64_t cur_time = *p_time;
 	uint64_t t = cur_time + interval_ns;
 	int count;
+
+	if (video->draw_event &&
+	    (is_receiving_texture || os_event_try(video->draw_event) && (is_receiving_texture = 1))) {
+		uint64_t milliseconds = util_mul_div64(interval_ns, 2, 1000);
+		int result = os_event_timedwait(video->draw_event, (unsigned long)milliseconds);
+
+		switch (result) {
+		case 0:
+			*p_time = t;
+			count = 1;
+			ResetEvent(video->draw_event);
+			break;
+		case ETIMEDOUT: {
+			is_receiving_texture = 0;
+			break;
+		}
+		default:
+			video->draw_event = NULL;
+			is_receiving_texture = 0;
+			break;
+		}
+	}
 
 	if (os_sleepto_ns(t)) {
 		*p_time = t;

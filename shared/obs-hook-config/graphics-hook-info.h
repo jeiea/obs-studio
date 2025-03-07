@@ -14,6 +14,8 @@
 #define EVENT_HOOK_READY L"CaptureHook_HookReady"
 #define EVENT_HOOK_EXIT L"CaptureHook_Exit"
 
+#define EVENT_HOOK_POST L"CaptureHook_Post"
+
 #define EVENT_HOOK_INIT L"CaptureHook_Initialize"
 
 #define WINDOW_HOOK_KEEPALIVE L"CaptureHook_KeepAlive"

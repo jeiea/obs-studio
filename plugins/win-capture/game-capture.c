@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <obs.h>
 #include <obs-module.h>
 #include <obs-hotkey.h>
 #include <util/dstr.h>
@@ -169,6 +170,7 @@ struct game_capture {
 	HANDLE hook_restart;
 	HANDLE hook_stop;
 	HANDLE hook_ready;
+	HANDLE hook_post;
 	HANDLE hook_exit;
 	HANDLE hook_data_map;
 	HANDLE global_hook_info_map;
@@ -333,6 +335,7 @@ static void stop_capture(struct game_capture *gc)
 	close_handle(&gc->hook_restart);
 	close_handle(&gc->hook_stop);
 	close_handle(&gc->hook_ready);
+	close_handle(&gc->hook_post);
 	close_handle(&gc->hook_exit);
 	close_handle(&gc->hook_init);
 	close_handle(&gc->hook_data_map);
@@ -816,8 +819,8 @@ static void pipe_log(void *param, uint8_t *data, size_t size)
 static inline bool init_pipe(struct game_capture *gc)
 {
 	char name[64];
-	snprintf(name, sizeof(name), "%s%lu", PIPE_NAME, gc->process_id);
 
+	snprintf(name, sizeof(name), "%s%lu", PIPE_NAME, gc->process_id);
 	if (!ipc_pipe_server_start(&gc->pipe, name, pipe_log, gc)) {
 		warn("init_pipe: failed to start pipe");
 		return false;
@@ -1050,6 +1053,8 @@ static bool init_hook(struct game_capture *gc)
 
 	SetEvent(gc->hook_init);
 
+	set_draw_event(gc->hook_post);
+
 	gc->window = gc->next_window;
 	gc->next_window = NULL;
 	gc->active = true;
@@ -1220,6 +1225,14 @@ static inline bool init_events(struct game_capture *gc)
 		gc->hook_ready = open_event_gc(gc, EVENT_HOOK_READY);
 		if (!gc->hook_ready) {
 			warn("init_events: failed to get hook_ready event: %lu", GetLastError());
+			return false;
+		}
+	}
+
+	if (!gc->hook_post) {
+		gc->hook_post = open_event_gc(gc, EVENT_HOOK_POST);
+		if (!gc->hook_post) {
+			warn("init_events: failed to get hook_post event: %lu", GetLastError());
 			return false;
 		}
 	}

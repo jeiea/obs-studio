@@ -1,12 +1,16 @@
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi.h>
 
 #include "dxgi-helpers.hpp"
 #include "graphics-hook.h"
 
 struct d3d11_data {
-	ID3D11Device *device;         /* do not release */
-	ID3D11DeviceContext *context; /* do not release */
+	ID3D11Device *device;           /* do not release */
+	ID3D11DeviceContext *context;   /* do not release */
+	ID3D11DeviceContext4 *context4; /* do not release */
+	ID3D11Fence *fence = nullptr;
+
 	uint32_t cx;
 	uint32_t cy;
 	DXGI_FORMAT format;
@@ -215,16 +219,35 @@ static void d3d11_init(IDXGISwapChain *swap)
 {
 	HWND window;
 	HRESULT hr;
+	bool isDevice5 = false;
 
-	hr = swap->GetDevice(__uuidof(ID3D11Device), (void **)&data.device);
+	hr = swap->GetDevice(__uuidof(ID3D11Device5), (void **)&data.device);
 	if (FAILED(hr)) {
-		hlog_hr("d3d11_init: failed to get device from swap", hr);
-		return;
+		hlog_hr("d3d11_init: failed to get device5 from swap", hr);
+
+		hr = swap->GetDevice(__uuidof(ID3D11Device), (void **)&data.device);
+		if (FAILED(hr)) {
+			hlog_hr("d3d11_init: failed to get device from swap", hr);
+			return;
+		}
+	} else {
+		isDevice5 = true;
 	}
 
 	data.device->Release();
 
 	data.device->GetImmediateContext(&data.context);
+
+	if (SUCCEEDED(data.context->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **)&data.context4))) {
+		static_cast<ID3D11Device5 *>(data.device)
+			->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence),
+				      reinterpret_cast<void **>(&data.fence));
+
+		data.context4->Release();
+
+		hlog("d3d11_init: created fence");
+	}
+
 	data.context->Release();
 
 	if (!d3d11_init_format(swap, window)) {
@@ -238,17 +261,40 @@ static void d3d11_init(IDXGISwapChain *swap)
 
 static inline void d3d11_copy_texture(ID3D11Resource *dst, ID3D11Resource *src)
 {
+	auto context = data.context4 ? data.context4 : data.context;
+
 	if (data.multisampled) {
-		data.context->ResolveSubresource(dst, 0, src, 0, data.format);
+		context->ResolveSubresource(dst, 0, src, 0, data.format);
 	} else {
-		data.context->CopyResource(dst, src);
+		context->CopyResource(dst, src);
 	}
 }
 
+extern "C" {
+extern HANDLE signal_post;
+}
+
+int signal_count = 0;
+
 static inline void d3d11_shtex_capture(ID3D11Resource *backbuffer)
 {
-	if (data.texture) {
+	if (!data.texture)
+		return;
+
+	D3D11_QUERY_DESC queryDesc{D3D11_QUERY_EVENT};
+
+	if (!data.fence) {
 		d3d11_copy_texture(data.texture, backbuffer);
+		return;
+	}
+
+	d3d11_copy_texture(data.texture, backbuffer);
+	data.context4->Signal(data.fence, ++signal_count);
+
+	auto result = data.fence->SetEventOnCompletion(signal_count, signal_post);
+	if (FAILED(result)) {
+		hlog_hr("d3d11_shtex_capture: failed to SetEventOnCompletion", result);
+		return;
 	}
 }
 
