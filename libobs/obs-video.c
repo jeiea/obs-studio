@@ -817,28 +817,6 @@ static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time, u
 	uint64_t t = cur_time + interval_ns;
 	int count;
 
-	if (video->draw_event &&
-	    (is_receiving_texture || os_event_try(video->draw_event) && (is_receiving_texture = 1))) {
-		uint64_t milliseconds = util_mul_div64(interval_ns, 2, 1000);
-		int result = os_event_timedwait(video->draw_event, (unsigned long)milliseconds);
-
-		switch (result) {
-		case 0:
-			*p_time = t;
-			count = 1;
-			ResetEvent(video->draw_event);
-			break;
-		case ETIMEDOUT: {
-			is_receiving_texture = 0;
-			break;
-		}
-		default:
-			video->draw_event = NULL;
-			is_receiving_texture = 0;
-			break;
-		}
-	}
-
 	if (os_sleepto_ns(t)) {
 		*p_time = t;
 		count = 1;
@@ -1150,10 +1128,27 @@ bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 	}
 #endif
 
+	if (obs->video.draw_event &&
+	    (is_receiving_texture || os_event_try(obs->video.draw_event) && (is_receiving_texture = 1))) {
+		int result = os_event_timedwait(obs->video.draw_event, 100);
+
+		switch (result) {
+		case 0:
+			break;
+		case ETIMEDOUT:
+		default:
+			is_receiving_texture = 0;
+			break;
+		}
+	}
+
 	source_profiler_render_begin();
 	profile_start(output_frame_name);
 	output_frames();
 	profile_end(output_frame_name);
+
+	if (obs->video.draw_event)
+		ResetEvent(obs->video.draw_event);
 
 	profile_start(render_displays_name);
 	render_displays();
