@@ -1147,8 +1147,9 @@ bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 	output_frames();
 	profile_end(output_frame_name);
 
-	if (obs->video.draw_event)
-		ResetEvent(obs->video.draw_event);
+	if (obs->video.draw_event) {
+		os_event_reset(obs->video.draw_event);
+	}
 
 	profile_start(render_displays_name);
 	render_displays();
