@@ -1,12 +1,20 @@
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi.h>
 
 #include "dxgi-helpers.hpp"
 #include "graphics-hook.h"
 
 struct d3d11_data {
-	ID3D11Device *device;         /* do not release */
-	ID3D11DeviceContext *context; /* do not release */
+	ID3D11Device *device;           /* do not release */
+	ID3D11DeviceContext *context;   /* do not release */
+	ID3D11DeviceContext4 *context4; /* release on free */
+	ID3D11Fence *fence = nullptr;
+	HANDLE fence_handle = nullptr;
+	uint64_t fence_value = 0;
+	bool fence_active = false;
+	bool fence_failed_logged = false;
+
 	uint32_t cx;
 	uint32_t cy;
 	DXGI_FORMAT format;
@@ -35,9 +43,37 @@ struct d3d11_data {
 
 static struct d3d11_data data = {};
 
+static inline void set_hook_reserved_u64(size_t lo_idx, uint64_t value)
+{
+	global_hook_info->reserved[lo_idx] = (uint32_t)(value & 0xffffffff);
+	global_hook_info->reserved[lo_idx + 1] = (uint32_t)(value >> 32);
+}
+
+static inline void clear_d3d11_fence_sync_info(void)
+{
+	global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_LO] = 0;
+	global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_HI] = 0;
+}
+
 void d3d11_free(void)
 {
+	clear_d3d11_fence_sync_info();
 	capture_free();
+
+	if (data.fence_handle) {
+		CloseHandle(data.fence_handle);
+		data.fence_handle = nullptr;
+	}
+
+	if (data.fence) {
+		data.fence->Release();
+		data.fence = nullptr;
+	}
+
+	if (data.context4) {
+		data.context4->Release();
+		data.context4 = nullptr;
+	}
 
 	if (data.using_shtex) {
 		if (data.texture)
@@ -190,6 +226,61 @@ static bool d3d11_shmem_init(HWND window)
 	return true;
 }
 
+static void d3d11_publish_fence_sync_info(void)
+{
+	clear_d3d11_fence_sync_info();
+
+	if (!data.fence_active || !data.fence)
+		return;
+
+	const DWORD desired_access = DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE;
+	HRESULT hr = data.fence->CreateSharedHandle(nullptr, desired_access, nullptr, &data.fence_handle);
+
+	if (FAILED(hr)) {
+		hlog_hr("d3d11_publish_fence_sync_info: failed to create shared fence handle", hr);
+		data.fence_active = false;
+		return;
+	}
+
+	DWORD obs_pid = global_hook_info->reserved[HOOK_INFO_RESERVED_OBS_PID];
+	if (!obs_pid) {
+		hlog("d3d11_publish_fence_sync_info: missing OBS pid; disabling fence sync");
+		CloseHandle(data.fence_handle);
+		data.fence_handle = nullptr;
+		data.fence_active = false;
+		clear_d3d11_fence_sync_info();
+		return;
+	}
+
+	HANDLE obs_process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, obs_pid);
+	if (!obs_process) {
+		hlog("d3d11_publish_fence_sync_info: failed to open OBS process for handle duplication: %lu",
+		     GetLastError());
+		CloseHandle(data.fence_handle);
+		data.fence_handle = nullptr;
+		data.fence_active = false;
+		clear_d3d11_fence_sync_info();
+		return;
+	}
+
+	HANDLE obs_fence_handle = nullptr;
+	BOOL duplicated = DuplicateHandle(GetCurrentProcess(), data.fence_handle, obs_process, &obs_fence_handle, 0,
+					 FALSE, DUPLICATE_SAME_ACCESS);
+	CloseHandle(obs_process);
+
+	if (!duplicated || !obs_fence_handle) {
+		hlog("d3d11_publish_fence_sync_info: failed to duplicate fence handle to OBS process: %lu",
+		     GetLastError());
+		CloseHandle(data.fence_handle);
+		data.fence_handle = nullptr;
+		data.fence_active = false;
+		clear_d3d11_fence_sync_info();
+		return;
+	}
+
+	set_hook_reserved_u64(HOOK_INFO_RESERVED_FENCE_HANDLE_LO, (uint64_t)(uintptr_t)obs_fence_handle);
+}
+
 static bool d3d11_shtex_init(HWND window)
 {
 	bool success;
@@ -207,6 +298,8 @@ static bool d3d11_shtex_init(HWND window)
 		return false;
 	}
 
+	d3d11_publish_fence_sync_info();
+
 	hlog("d3d11 shared texture capture successful");
 	return true;
 }
@@ -215,6 +308,7 @@ static void d3d11_init(IDXGISwapChain *swap)
 {
 	HWND window;
 	HRESULT hr;
+	ID3D11Device5 *device5 = nullptr;
 
 	hr = swap->GetDevice(__uuidof(ID3D11Device), (void **)&data.device);
 	if (FAILED(hr)) {
@@ -222,9 +316,28 @@ static void d3d11_init(IDXGISwapChain *swap)
 		return;
 	}
 
-	data.device->Release();
+	hr = data.device->QueryInterface(__uuidof(ID3D11Device5), (void **)&device5);
+	if (FAILED(hr))
+		hlog("d3d11_init: ID3D11Device5 unavailable; fence sync disabled");
 
 	data.device->GetImmediateContext(&data.context);
+
+	if (device5 &&
+	    SUCCEEDED(data.context->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **)&data.context4))) {
+		hr = device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, __uuidof(ID3D11Fence),
+					  reinterpret_cast<void **>(&data.fence));
+		if (SUCCEEDED(hr)) {
+			data.fence_value = 0;
+			data.fence_active = true;
+			hlog("d3d11_init: created fence (GPU-only)");
+		} else {
+			hlog_hr("d3d11_init: failed to create fence", hr);
+		}
+	}
+
+	if (device5)
+		device5->Release();
+	data.device->Release();
 	data.context->Release();
 
 	if (!d3d11_init_format(swap, window)) {
@@ -247,8 +360,28 @@ static inline void d3d11_copy_texture(ID3D11Resource *dst, ID3D11Resource *src)
 
 static inline void d3d11_shtex_capture(ID3D11Resource *backbuffer)
 {
-	if (data.texture) {
-		d3d11_copy_texture(data.texture, backbuffer);
+	if (!data.texture)
+		return;
+
+	d3d11_copy_texture(data.texture, backbuffer);
+
+	if (!data.fence_active)
+		return;
+
+	if (!data.context4 || !data.fence) {
+		data.fence_active = false;
+		clear_d3d11_fence_sync_info();
+		return;
+	}
+
+	HRESULT hr = data.context4->Signal(data.fence, ++data.fence_value);
+	if (FAILED(hr)) {
+		if (!data.fence_failed_logged) {
+			hlog("d3d11_shtex_capture: failed to signal fence; disabling fence sync (hr: 0x%08lX, fence: 0x%p)", hr, data.fence);
+			data.fence_failed_logged = true;
+		}
+		data.fence_active = false;
+		clear_d3d11_fence_sync_info();
 	}
 }
 

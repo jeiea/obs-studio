@@ -1,4 +1,9 @@
 #include <inttypes.h>
+
+#ifndef COBJMACROS
+#define COBJMACROS
+#endif
+
 #include <obs-module.h>
 #include <obs-hotkey.h>
 #include <util/dstr.h>
@@ -6,6 +11,8 @@
 #include <util/threading.h>
 #include <util/windows/window-helpers.h>
 #include <windows.h>
+#include <initguid.h>
+#include <d3d11_4.h>
 #include <dxgi.h>
 #include <util/sse-intrin.h>
 #include <util/util_uint64.h>
@@ -88,6 +95,7 @@
 
 #define DEFAULT_RETRY_INTERVAL 2.0f
 #define ERROR_RETRY_INTERVAL 4.0f
+#define D3D11_FENCE_RETRY_INTERVAL_MS 100ULL
 
 enum capture_mode { CAPTURE_MODE_ANY, CAPTURE_MODE_WINDOW, CAPTURE_MODE_HOTKEY };
 
@@ -163,6 +171,11 @@ struct game_capture {
 	gs_texrender_t *extra_texrender;
 	bool is_10a2_2100pq;
 	bool linear_sample;
+	ID3D11Fence *shared_fence;
+	ID3D11DeviceContext4 *fence_context4;
+	uint64_t last_waited_fence_value;
+	bool fence_wait_active;
+	uint64_t fence_wait_retry_time_ms;
 	struct hook_info *global_hook_info;
 	HANDLE keepalive_mutex;
 	HANDLE hook_init;
@@ -197,6 +210,8 @@ struct game_capture {
 
 struct graphics_offsets offsets32 = {0};
 struct graphics_offsets offsets64 = {0};
+
+extern bool graphics_uses_d3d11;
 
 static inline bool use_anticheat(struct game_capture *gc)
 {
@@ -309,9 +324,150 @@ static inline float hook_rate_to_float(enum hook_rate rate)
 	}
 }
 
+static inline bool shared_fence_available(const struct game_capture *gc)
+{
+	if (!gc->global_hook_info)
+		return false;
+
+	const uint64_t shared_fence_handle =
+		((uint64_t)gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_HI] << 32) |
+		gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_LO];
+	return shared_fence_handle != 0;
+}
+
+static inline uint64_t get_hook_reserved_u64(const struct hook_info *hook_info, size_t lo_idx)
+{
+	return ((uint64_t)hook_info->reserved[lo_idx + 1] << 32) | hook_info->reserved[lo_idx];
+}
+
+static inline void schedule_d3d11_fence_wait_retry(struct game_capture *gc)
+{
+	gc->fence_wait_retry_time_ms = GetTickCount64() + D3D11_FENCE_RETRY_INTERVAL_MS;
+}
+
+static void free_d3d11_fence_wait(struct game_capture *gc)
+{
+	if (gc->fence_context4) {
+		ID3D11DeviceContext4_Release(gc->fence_context4);
+		gc->fence_context4 = NULL;
+	}
+
+	if (gc->shared_fence) {
+		ID3D11Fence_Release(gc->shared_fence);
+		gc->shared_fence = NULL;
+	}
+
+	gc->last_waited_fence_value = 0;
+	gc->fence_wait_active = false;
+	gc->fence_wait_retry_time_ms = 0;
+}
+
+static void init_d3d11_fence_wait(struct game_capture *gc)
+{
+	free_d3d11_fence_wait(gc);
+
+	if (!graphics_uses_d3d11 || !shared_fence_available(gc)) {
+		debug("init_d3d11_fence_wait: not using d3d11 or shared fence not available");
+		return;
+	}
+
+	ID3D11Device *device = (ID3D11Device *)gs_get_device_obj();
+	if (!device) {
+		warn("init_d3d11_fence_wait: failed to get device");
+		schedule_d3d11_fence_wait_retry(gc);
+		return;
+	}
+
+	ID3D11Device5 *device5 = NULL;
+	HRESULT hr = ID3D11Device_QueryInterface(device, &IID_ID3D11Device5, (void **)&device5);
+	if (FAILED(hr)) {
+		warn("init_d3d11_fence_wait: failed to query ID3D11Device5: %08lX", hr);
+		schedule_d3d11_fence_wait_retry(gc);
+		return;
+	}
+
+	ID3D11DeviceContext *context = NULL;
+	ID3D11Device_GetImmediateContext(device, &context);
+	if (!context) {
+		warn("init_d3d11_fence_wait: failed to get immediate context");
+		ID3D11Device5_Release(device5);
+		schedule_d3d11_fence_wait_retry(gc);
+		return;
+	}
+
+	hr = ID3D11DeviceContext_QueryInterface(context, &IID_ID3D11DeviceContext4, (void **)&gc->fence_context4);
+	if (FAILED(hr)) {
+		warn("init_d3d11_fence_wait: failed to query ID3D11DeviceContext4: %08lX", hr);
+		ID3D11DeviceContext_Release(context);
+		ID3D11Device5_Release(device5);
+		schedule_d3d11_fence_wait_retry(gc);
+		return;
+	}
+
+	const HANDLE shared_fence_handle =
+		(HANDLE)(uintptr_t)get_hook_reserved_u64(gc->global_hook_info, HOOK_INFO_RESERVED_FENCE_HANDLE_LO);
+	if (shared_fence_handle) {
+		hr = ID3D11Device5_OpenSharedFence(device5, shared_fence_handle, &IID_ID3D11Fence,
+						   (void **)&gc->shared_fence);
+
+		if (shared_fence_handle != INVALID_HANDLE_VALUE)
+			CloseHandle(shared_fence_handle);
+
+		if (FAILED(hr))
+			debug("init_d3d11_fence_wait: failed to open shared fence handle: %08lX (%p)", hr, shared_fence_handle);
+	} else {
+		hr = E_FAIL;
+		debug("init_d3d11_fence_wait: shared fence handle not available");
+	}
+
+	ID3D11DeviceContext_Release(context);
+	ID3D11Device5_Release(device5);
+
+	if (FAILED(hr)) {
+		free_d3d11_fence_wait(gc);
+		schedule_d3d11_fence_wait_retry(gc);
+		return;
+	}
+
+	gc->last_waited_fence_value = 0;
+	gc->fence_wait_active = true;
+	gc->fence_wait_retry_time_ms = 0;
+
+	debug("init_d3d11_fence_wait: success");
+}
+
+static inline void wait_for_d3d11_shared_fence(struct game_capture *gc)
+{
+	if (!gc->global_hook_info)
+		return;
+
+	if (!gc->fence_wait_active || !gc->fence_context4 || !gc->shared_fence) {
+		if (!graphics_uses_d3d11 || !shared_fence_available(gc))
+			return;
+
+		const uint64_t now_ms = GetTickCount64();
+		if (gc->fence_wait_retry_time_ms && now_ms < gc->fence_wait_retry_time_ms)
+			return;
+
+		init_d3d11_fence_wait(gc);
+		return;
+	}
+
+	const uint64_t completed_fence_value = ID3D11Fence_GetCompletedValue(gc->shared_fence);
+	const uint64_t next_fence_value = gc->last_waited_fence_value + 1;
+	const uint64_t fence_value = min(completed_fence_value, next_fence_value);
+
+	if (fence_value == gc->last_waited_fence_value)
+		return;
+
+	ID3D11DeviceContext4_Wait(gc->fence_context4, gc->shared_fence, fence_value);
+	gc->last_waited_fence_value = fence_value;
+}
+
 static void stop_capture(struct game_capture *gc)
 {
 	ipc_pipe_server_free(&gc->pipe);
+	free_d3d11_fence_wait(gc);
 
 	if (gc->hook_stop) {
 		SetEvent(gc->hook_stop);
@@ -794,6 +950,9 @@ static inline bool init_hook_info(struct game_capture *gc)
 	gc->global_hook_info->force_shmem = gc->config.force_shmem;
 	gc->global_hook_info->UNUSED_use_scale = false;
 	gc->global_hook_info->allow_srgb_alias = true;
+	gc->global_hook_info->reserved[HOOK_INFO_RESERVED_OBS_PID] = GetCurrentProcessId();
+	gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_LO] = 0;
+	gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_HI] = 0;
 	reset_frame_interval(gc);
 
 	obs_enter_graphics();
@@ -1525,6 +1684,8 @@ static inline bool is_16bit_format(uint32_t format)
 
 static inline bool init_shmem_capture(struct game_capture *gc)
 {
+	free_d3d11_fence_wait(gc);
+
 	const uint32_t dxgi_format = gc->global_hook_info->format;
 	const bool convert_16bit = is_16bit_format(dxgi_format);
 	const enum gs_color_format format = convert_16bit ? GS_BGRA : convert_format(dxgi_format);
@@ -1573,6 +1734,8 @@ static inline bool init_shmem_capture(struct game_capture *gc)
 
 static inline bool init_shtex_capture(struct game_capture *gc)
 {
+	free_d3d11_fence_wait(gc);
+
 	obs_enter_graphics();
 	gs_texrender_destroy(gc->extra_texrender);
 	gc->extra_texrender = NULL;
@@ -1610,6 +1773,7 @@ static inline bool init_shtex_capture(struct game_capture *gc)
 			gc->linear_sample = linear_sample;
 			gc->extra_texture = extra_texture;
 			gc->extra_texrender = extra_texrender;
+			init_d3d11_fence_wait(gc);
 		} else {
 			gs_texture_destroy(texture);
 		}
@@ -1863,6 +2027,7 @@ static void game_capture_render(void *data, gs_effect_t *unused)
 	gs_effect_t *const effect = obs_get_base_effect(allow_transparency ? OBS_EFFECT_DEFAULT : OBS_EFFECT_OPAQUE);
 
 	gs_texture_t *texture = gc->texture;
+	wait_for_d3d11_shared_fence(gc);
 	enum gs_color_space source_space = GS_CS_SRGB;
 	bool is_10a2_compressed = false;
 	if (gs_texture_get_color_format(texture) == GS_R10G10B10A2) {

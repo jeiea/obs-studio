@@ -90,6 +90,12 @@ struct graphics_offsets {
 	struct d3d12_offsets d3d12;
 };
 
+enum hook_info_reserved_idx {
+	HOOK_INFO_RESERVED_OBS_PID = 0,
+	HOOK_INFO_RESERVED_FENCE_HANDLE_LO = 1,
+	HOOK_INFO_RESERVED_FENCE_HANDLE_HI = 2,
+};
+
 struct hook_info {
 	/* hook version */
 	uint32_t hook_ver_major;
