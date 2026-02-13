@@ -176,8 +176,6 @@ struct game_capture {
 	uint64_t pending_fence_value;
 	bool fence_wait_active;
 	bool has_pending_fence_wait;
-	bool fence_wait_disabled_until_signal_change;
-	uint64_t fence_wait_disabled_signal_value;
 	uint64_t fence_wait_retry_time_ms;
 	struct hook_info *global_hook_info;
 	HANDLE keepalive_mutex;
@@ -372,8 +370,6 @@ static void free_d3d11_fence_wait(struct game_capture *gc)
 	gc->pending_fence_value = 0;
 	gc->fence_wait_active = false;
 	gc->has_pending_fence_wait = false;
-	gc->fence_wait_disabled_until_signal_change = false;
-	gc->fence_wait_disabled_signal_value = 0;
 	gc->fence_wait_retry_time_ms = 0;
 }
 
@@ -447,8 +443,6 @@ static void init_d3d11_fence_wait(struct game_capture *gc)
 	gc->pending_fence_value = 0;
 	gc->fence_wait_active = true;
 	gc->has_pending_fence_wait = false;
-	gc->fence_wait_disabled_until_signal_change = false;
-	gc->fence_wait_disabled_signal_value = 0;
 	gc->fence_wait_retry_time_ms = 0;
 
 	info("init_d3d11_fence_wait: success");
@@ -456,8 +450,6 @@ static void init_d3d11_fence_wait(struct game_capture *gc)
 
 static inline void update_d3d11_shared_fence_wait_value(struct game_capture *gc)
 {
-	gc->has_pending_fence_wait = false;
-
 	if (!gc->global_hook_info)
 		return;
 
@@ -473,39 +465,12 @@ static inline void update_d3d11_shared_fence_wait_value(struct game_capture *gc)
 		return;
 	}
 
-	uint64_t fence_value = get_hook_atomic_u64(&gc->global_hook_info->d3d11_last_signaled_fence_value);
+	const uint64_t last_signaled_fence_value = get_hook_atomic_u64((volatile LONG64 *)&gc->global_hook_info->d3d11_last_signaled_fence_value);
+	const uint64_t next_fence_value = gc->pending_fence_value + 1;
+	// Last signal will be sent when freeing the fence.
+	const uint64_t fence_value = min(last_signaled_fence_value + 1, next_fence_value);
 
-	if (gc->fence_wait_disabled_until_signal_change) {
-		if (fence_value == gc->fence_wait_disabled_signal_value)
-			return;
-
-		gc->fence_wait_disabled_until_signal_change = false;
-	}
-
-	if (fence_value == gc->pending_fence_value) {
-		const uint64_t wait_ns = get_obs_half_frame_interval_ns();
-		if (wait_ns) {
-			const uint64_t deadline = os_gettime_ns() + wait_ns;
-			do {
-				Sleep(0);
-				fence_value = get_hook_atomic_u64(&gc->global_hook_info->d3d11_last_signaled_fence_value);
-				if (fence_value != gc->pending_fence_value)
-					break;
-			} while (os_gettime_ns() < deadline);
-
-			if (fence_value == gc->pending_fence_value) {
-				gc->fence_wait_disabled_until_signal_change = true;
-				gc->fence_wait_disabled_signal_value = fence_value;
-				gc->has_pending_fence_wait = false;
-				return;
-			}
-		}
-	}
-
-	if (fence_value < gc->pending_fence_value)
-		fence_value = gc->pending_fence_value;
-
-	if (fence_value == 0)
+	if (fence_value == gc->pending_fence_value)
 		return;
 
 	gc->pending_fence_value = fence_value;
