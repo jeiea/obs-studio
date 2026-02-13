@@ -1,6 +1,7 @@
 #pragma once
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -90,12 +91,6 @@ struct graphics_offsets {
 	struct d3d12_offsets d3d12;
 };
 
-enum hook_info_reserved_idx {
-	HOOK_INFO_RESERVED_OBS_PID = 0,
-	HOOK_INFO_RESERVED_FENCE_HANDLE_LO = 1,
-	HOOK_INFO_RESERVED_FENCE_HANDLE_HI = 2,
-};
-
 struct hook_info {
 	/* hook version */
 	uint32_t hook_ver_major;
@@ -124,9 +119,17 @@ struct hook_info {
 	/* hook addresses */
 	struct graphics_offsets offsets;
 
-	uint32_t reserved[126];
+	uint32_t obs_pid;
+	uint32_t UNUSED_pad0;
+	uint64_t d3d11_shared_fence_handle;
+	volatile LONG64 d3d11_last_signaled_fence_value;
+	uint32_t reserved[120];
 };
 static_assert(sizeof(struct hook_info) == 648, "ABI compatibility");
+static_assert(offsetof(struct hook_info, d3d11_shared_fence_handle) % sizeof(uint64_t) == 0,
+	      "d3d11_shared_fence_handle must be 64-bit aligned for atomic access");
+static_assert(offsetof(struct hook_info, d3d11_last_signaled_fence_value) % sizeof(uint64_t) == 0,
+	      "d3d11_last_signaled_fence_value must be 64-bit aligned for atomic access");
 
 #pragma pack(pop)
 

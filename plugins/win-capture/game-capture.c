@@ -173,8 +173,11 @@ struct game_capture {
 	bool linear_sample;
 	ID3D11Fence *shared_fence;
 	ID3D11DeviceContext4 *fence_context4;
-	uint64_t last_waited_fence_value;
+	uint64_t pending_fence_value;
 	bool fence_wait_active;
+	bool has_pending_fence_wait;
+	bool fence_wait_disabled_until_signal_change;
+	uint64_t fence_wait_disabled_signal_value;
 	uint64_t fence_wait_retry_time_ms;
 	struct hook_info *global_hook_info;
 	HANDLE keepalive_mutex;
@@ -324,20 +327,29 @@ static inline float hook_rate_to_float(enum hook_rate rate)
 	}
 }
 
+static inline uint64_t get_hook_atomic_u64(volatile LONG64 *value)
+{
+	return (uint64_t)InterlockedCompareExchange64(value, 0, 0);
+}
+
+static inline uint64_t get_obs_half_frame_interval_ns(void)
+{
+	struct obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || !ovi.fps_num)
+		return 0;
+
+	const uint64_t frame_interval_ns = util_mul_div64(ovi.fps_den, 1000000000ULL, ovi.fps_num);
+	return frame_interval_ns ? max(1ULL, frame_interval_ns / 2) : 0;
+}
+
 static inline bool shared_fence_available(const struct game_capture *gc)
 {
 	if (!gc->global_hook_info)
 		return false;
 
 	const uint64_t shared_fence_handle =
-		((uint64_t)gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_HI] << 32) |
-		gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_LO];
+		get_hook_atomic_u64((volatile LONG64 *)&gc->global_hook_info->d3d11_shared_fence_handle);
 	return shared_fence_handle != 0;
-}
-
-static inline uint64_t get_hook_reserved_u64(const struct hook_info *hook_info, size_t lo_idx)
-{
-	return ((uint64_t)hook_info->reserved[lo_idx + 1] << 32) | hook_info->reserved[lo_idx];
 }
 
 static inline void schedule_d3d11_fence_wait_retry(struct game_capture *gc)
@@ -357,8 +369,11 @@ static void free_d3d11_fence_wait(struct game_capture *gc)
 		gc->shared_fence = NULL;
 	}
 
-	gc->last_waited_fence_value = 0;
+	gc->pending_fence_value = 0;
 	gc->fence_wait_active = false;
+	gc->has_pending_fence_wait = false;
+	gc->fence_wait_disabled_until_signal_change = false;
+	gc->fence_wait_disabled_signal_value = 0;
 	gc->fence_wait_retry_time_ms = 0;
 }
 
@@ -367,7 +382,7 @@ static void init_d3d11_fence_wait(struct game_capture *gc)
 	free_d3d11_fence_wait(gc);
 
 	if (!graphics_uses_d3d11 || !shared_fence_available(gc)) {
-		debug("init_d3d11_fence_wait: not using d3d11 or shared fence not available");
+		info("init_d3d11_fence_wait: not using d3d11 or shared fence not available");
 		return;
 	}
 
@@ -405,7 +420,7 @@ static void init_d3d11_fence_wait(struct game_capture *gc)
 	}
 
 	const HANDLE shared_fence_handle =
-		(HANDLE)(uintptr_t)get_hook_reserved_u64(gc->global_hook_info, HOOK_INFO_RESERVED_FENCE_HANDLE_LO);
+		(HANDLE)(uintptr_t)get_hook_atomic_u64((volatile LONG64 *)&gc->global_hook_info->d3d11_shared_fence_handle);
 	if (shared_fence_handle) {
 		hr = ID3D11Device5_OpenSharedFence(device5, shared_fence_handle, &IID_ID3D11Fence,
 						   (void **)&gc->shared_fence);
@@ -414,10 +429,10 @@ static void init_d3d11_fence_wait(struct game_capture *gc)
 			CloseHandle(shared_fence_handle);
 
 		if (FAILED(hr))
-			debug("init_d3d11_fence_wait: failed to open shared fence handle: %08lX (%p)", hr, shared_fence_handle);
+			warn("init_d3d11_fence_wait: failed to open shared fence handle: %08lX (%p)", hr, shared_fence_handle);
 	} else {
 		hr = E_FAIL;
-		debug("init_d3d11_fence_wait: shared fence handle not available");
+		warn("init_d3d11_fence_wait: shared fence handle not available");
 	}
 
 	ID3D11DeviceContext_Release(context);
@@ -429,15 +444,20 @@ static void init_d3d11_fence_wait(struct game_capture *gc)
 		return;
 	}
 
-	gc->last_waited_fence_value = 0;
+	gc->pending_fence_value = 0;
 	gc->fence_wait_active = true;
+	gc->has_pending_fence_wait = false;
+	gc->fence_wait_disabled_until_signal_change = false;
+	gc->fence_wait_disabled_signal_value = 0;
 	gc->fence_wait_retry_time_ms = 0;
 
-	debug("init_d3d11_fence_wait: success");
+	info("init_d3d11_fence_wait: success");
 }
 
-static inline void wait_for_d3d11_shared_fence(struct game_capture *gc)
+static inline void update_d3d11_shared_fence_wait_value(struct game_capture *gc)
 {
+	gc->has_pending_fence_wait = false;
+
 	if (!gc->global_hook_info)
 		return;
 
@@ -453,15 +473,52 @@ static inline void wait_for_d3d11_shared_fence(struct game_capture *gc)
 		return;
 	}
 
-	const uint64_t completed_fence_value = ID3D11Fence_GetCompletedValue(gc->shared_fence);
-	const uint64_t next_fence_value = gc->last_waited_fence_value + 1;
-	const uint64_t fence_value = min(completed_fence_value, next_fence_value);
+	uint64_t fence_value = get_hook_atomic_u64(&gc->global_hook_info->d3d11_last_signaled_fence_value);
 
-	if (fence_value == gc->last_waited_fence_value)
+	if (gc->fence_wait_disabled_until_signal_change) {
+		if (fence_value == gc->fence_wait_disabled_signal_value)
+			return;
+
+		gc->fence_wait_disabled_until_signal_change = false;
+	}
+
+	if (fence_value == gc->pending_fence_value) {
+		const uint64_t wait_ns = get_obs_half_frame_interval_ns();
+		if (wait_ns) {
+			const uint64_t deadline = os_gettime_ns() + wait_ns;
+			do {
+				Sleep(0);
+				fence_value = get_hook_atomic_u64(&gc->global_hook_info->d3d11_last_signaled_fence_value);
+				if (fence_value != gc->pending_fence_value)
+					break;
+			} while (os_gettime_ns() < deadline);
+
+			if (fence_value == gc->pending_fence_value) {
+				gc->fence_wait_disabled_until_signal_change = true;
+				gc->fence_wait_disabled_signal_value = fence_value;
+				gc->has_pending_fence_wait = false;
+				return;
+			}
+		}
+	}
+
+	if (fence_value < gc->pending_fence_value)
+		fence_value = gc->pending_fence_value;
+
+	if (fence_value == 0)
 		return;
 
-	ID3D11DeviceContext4_Wait(gc->fence_context4, gc->shared_fence, fence_value);
-	gc->last_waited_fence_value = fence_value;
+	gc->pending_fence_value = fence_value;
+	gc->has_pending_fence_wait = true;
+}
+
+static inline void wait_for_d3d11_shared_fence(struct game_capture *gc)
+{
+	if (!gc->has_pending_fence_wait || !gc->fence_context4 || !gc->shared_fence)
+		return;
+
+	ID3D11DeviceContext4_Wait(gc->fence_context4, gc->shared_fence, gc->pending_fence_value);
+	gc->has_pending_fence_wait = false;
 }
 
 static void stop_capture(struct game_capture *gc)
@@ -950,9 +1007,9 @@ static inline bool init_hook_info(struct game_capture *gc)
 	gc->global_hook_info->force_shmem = gc->config.force_shmem;
 	gc->global_hook_info->UNUSED_use_scale = false;
 	gc->global_hook_info->allow_srgb_alias = true;
-	gc->global_hook_info->reserved[HOOK_INFO_RESERVED_OBS_PID] = GetCurrentProcessId();
-	gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_LO] = 0;
-	gc->global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_HI] = 0;
+	gc->global_hook_info->obs_pid = GetCurrentProcessId();
+	InterlockedExchange64((volatile LONG64 *)&gc->global_hook_info->d3d11_shared_fence_handle, 0);
+	InterlockedExchange64(&gc->global_hook_info->d3d11_last_signaled_fence_value, 0);
 	reset_frame_interval(gc);
 
 	obs_enter_graphics();
@@ -1955,6 +2012,8 @@ static void game_capture_tick(void *data, float seconds)
 			     "terminating capture");
 			stop_capture(gc);
 		} else {
+			update_d3d11_shared_fence_wait_value(gc);
+
 			if (gc->copy_texture) {
 				obs_enter_graphics();
 				gc->copy_texture(gc);

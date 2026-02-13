@@ -43,16 +43,15 @@ struct d3d11_data {
 
 static struct d3d11_data data = {};
 
-static inline void set_hook_reserved_u64(size_t lo_idx, uint64_t value)
+static inline void set_hook_atomic_u64(volatile LONG64 *dst, uint64_t value)
 {
-	global_hook_info->reserved[lo_idx] = (uint32_t)(value & 0xffffffff);
-	global_hook_info->reserved[lo_idx + 1] = (uint32_t)(value >> 32);
+	InterlockedExchange64(dst, (LONG64)value);
 }
 
 static inline void clear_d3d11_fence_sync_info(void)
 {
-	global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_LO] = 0;
-	global_hook_info->reserved[HOOK_INFO_RESERVED_FENCE_HANDLE_HI] = 0;
+	set_hook_atomic_u64((volatile LONG64 *)&global_hook_info->d3d11_shared_fence_handle, 0);
+	set_hook_atomic_u64(&global_hook_info->d3d11_last_signaled_fence_value, 0);
 }
 
 void d3d11_free(void)
@@ -242,7 +241,7 @@ static void d3d11_publish_fence_sync_info(void)
 		return;
 	}
 
-	DWORD obs_pid = global_hook_info->reserved[HOOK_INFO_RESERVED_OBS_PID];
+	DWORD obs_pid = global_hook_info->obs_pid;
 	if (!obs_pid) {
 		hlog("d3d11_publish_fence_sync_info: missing OBS pid; disabling fence sync");
 		CloseHandle(data.fence_handle);
@@ -278,7 +277,9 @@ static void d3d11_publish_fence_sync_info(void)
 		return;
 	}
 
-	set_hook_reserved_u64(HOOK_INFO_RESERVED_FENCE_HANDLE_LO, (uint64_t)(uintptr_t)obs_fence_handle);
+	set_hook_atomic_u64((volatile LONG64 *)&global_hook_info->d3d11_shared_fence_handle,
+			    (uint64_t)(uintptr_t)obs_fence_handle);
+	set_hook_atomic_u64(&global_hook_info->d3d11_last_signaled_fence_value, data.fence_value);
 }
 
 static bool d3d11_shtex_init(HWND window)
@@ -382,7 +383,10 @@ static inline void d3d11_shtex_capture(ID3D11Resource *backbuffer)
 		}
 		data.fence_active = false;
 		clear_d3d11_fence_sync_info();
+		return;
 	}
+
+	set_hook_atomic_u64(&global_hook_info->d3d11_last_signaled_fence_value, data.fence_value);
 }
 
 static void d3d11_shmem_capture_copy(int i)
