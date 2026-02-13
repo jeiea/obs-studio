@@ -60,6 +60,7 @@ void d3d11_free(void)
 	capture_free();
 
 	if (data.fence_handle) {
+		data.context4->Signal(data.fence, ++data.fence_value);
 		CloseHandle(data.fence_handle);
 		data.fence_handle = nullptr;
 	}
