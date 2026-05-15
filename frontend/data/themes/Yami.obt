@@ -532,7 +532,7 @@ QWidget {
     selection-background-color: var(--primary);
     selection-color: var(--text);
     font-size: var(--font_base);
-    font-family: 'Open Sans', '.AppleSystemUIFont', Helvetica, Arial, 'MS Shell Dlg', sans-serif;
+    font-family: 'NanumGothic', 'Open Sans', '.AppleSystemUIFont', Helvetica, Arial, 'MS Shell Dlg', sans-serif;
 }
 
 QWidget:disabled {
